@@ -7,6 +7,7 @@
   --model-message-bg: #e5e5ea;
   --border-radius: 12px;
   --box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  --recording-color: #e63946;
 }
 
 body {
@@ -89,8 +90,9 @@ body {
   border-top: 1px solid #eee;
 }
 
-.chat-form {
+.chat-form-container {
   display: flex;
+  align-items: center;
   padding: 16px;
   border-top: 1px solid #eee;
   background-color: var(--background-color);
@@ -115,8 +117,7 @@ body {
     background-color: #f0f0f0;
 }
 
-
-#send-button {
+#mic-button {
   background-color: var(--primary-color);
   border: none;
   color: white;
@@ -128,13 +129,19 @@ body {
   justify-content: center;
   align-items: center;
   transition: background-color 0.3s;
+  flex-shrink: 0;
 }
 
-#send-button:hover:not(:disabled) {
+#mic-button.recording {
+    background-color: var(--recording-color);
+    animation: pulse 1.5s infinite;
+}
+
+#mic-button:hover:not(:disabled) {
   background-color: #357abd;
 }
 
-#send-button:disabled {
+#mic-button:disabled {
   background-color: #a0c7e4;
   cursor: not-allowed;
 }
@@ -159,4 +166,16 @@ body {
 @keyframes bounce {
   0%, 80%, 100% { transform: scale(0); }
   40% { transform: scale(1.0); }
+}
+
+@keyframes pulse {
+    0% {
+        box-shadow: 0 0 0 0 rgba(230, 57, 70, 0.7);
+    }
+    70% {
+        box-shadow: 0 0 0 10px rgba(230, 57, 70, 0);
+    }
+    100% {
+        box-shadow: 0 0 0 0 rgba(230, 57, 70, 0);
+    }
 }

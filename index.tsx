@@ -11,9 +11,7 @@ import {
 
 // DOM Elements
 const chatContainer = document.getElementById('chat-container') as HTMLDivElement;
-const chatForm = document.getElementById('chat-form') as HTMLFormElement;
-const chatInput = document.getElementById('chat-input') as HTMLInputElement;
-const sendButton = document.getElementById('send-button') as HTMLButtonElement;
+const micButton = document.getElementById('mic-button') as HTMLButtonElement;
 const statusDiv = document.getElementById('status') as HTMLDivElement;
 const audioPlayer = document.getElementById('audio-player') as HTMLAudioElement;
 
@@ -22,6 +20,11 @@ let session: Session | undefined = undefined;
 const responseQueue: LiveServerMessage[] = [];
 let audioParts: string[] = [];
 let currentModelTurn: HTMLDivElement | null = null;
+let isRecording = false;
+let mediaRecorder: MediaRecorder | null = null;
+let audioStream: MediaStream | null = null;
+let isProcessingTurn = false;
+
 
 // Utility to add messages to the chat
 function addMessage(sender: 'user' | 'model', text: string): HTMLDivElement {
@@ -49,8 +52,18 @@ function updateModelMessage(element: HTMLDivElement, newText: string) {
     element.textContent = newText;
 }
 
+// --- Audio Processing ---
 
-// --- Audio Processing (Browser-compatible) ---
+// Converts an ArrayBuffer to a Base64 string.
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+}
 
 interface WavConversionOptions {
   numChannels: number;
@@ -86,43 +99,22 @@ function createWavHeader(dataLength: number, options: WavConversionOptions): Arr
   const buffer = new ArrayBuffer(44);
   const view = new DataView(buffer);
 
-  // RIFF identifier
-  view.setUint8(0, 'R'.charCodeAt(0));
-  view.setUint8(1, 'I'.charCodeAt(0));
-  view.setUint8(2, 'F'.charCodeAt(0));
-  view.setUint8(3, 'F'.charCodeAt(0));
-  // RIFF chunk length
+  // RIFF identifier, chunk length, WAVE identifier
+  view.setUint8(0, 'R'.charCodeAt(0)); view.setUint8(1, 'I'.charCodeAt(0)); view.setUint8(2, 'F'.charCodeAt(0)); view.setUint8(3, 'F'.charCodeAt(0));
   view.setUint32(4, 36 + dataLength, true);
-  // WAVE identifier
-  view.setUint8(8, 'W'.charCodeAt(0));
-  view.setUint8(9, 'A'.charCodeAt(0));
-  view.setUint8(10, 'V'.charCodeAt(0));
-  view.setUint8(11, 'E'.charCodeAt(0));
-  // FMT identifier
-  view.setUint8(12, 'f'.charCodeAt(0));
-  view.setUint8(13, 'm'.charCodeAt(0));
-  view.setUint8(14, 't'.charCodeAt(0));
-  view.setUint8(15, ' '.charCodeAt(0));
-  // FMT chunk length
+  view.setUint8(8, 'W'.charCodeAt(0)); view.setUint8(9, 'A'.charCodeAt(0)); view.setUint8(10, 'V'.charCodeAt(0)); view.setUint8(11, 'E'.charCodeAt(0));
+  // FMT identifier, chunk length, audio format, channels, sample rate
+  view.setUint8(12, 'f'.charCodeAt(0)); view.setUint8(13, 'm'.charCodeAt(0)); view.setUint8(14, 't'.charCodeAt(0)); view.setUint8(15, ' '.charCodeAt(0));
   view.setUint32(16, 16, true);
-  // Audio format (1 is linear quantization)
   view.setUint16(20, 1, true);
-  // Number of channels
   view.setUint16(22, numChannels, true);
-  // Sample rate
   view.setUint32(24, sampleRate, true);
-  // Byte rate
+  // Byte rate, block align, bits per sample
   view.setUint32(28, byteRate, true);
-  // Block align
   view.setUint16(32, blockAlign, true);
-  // Bits per sample
   view.setUint16(34, bitsPerSample, true);
-  // data identifier
-  view.setUint8(36, 'd'.charCodeAt(0));
-  view.setUint8(37, 'a'.charCodeAt(0));
-  view.setUint8(38, 't'.charCodeAt(0));
-  view.setUint8(39, 'a'.charCodeAt(0));
-  // data chunk length
+  // data identifier, chunk length
+  view.setUint8(36, 'd'.charCodeAt(0)); view.setUint8(37, 'a'.charCodeAt(0)); view.setUint8(38, 't'.charCodeAt(0)); view.setUint8(39, 'a'.charCodeAt(0));
   view.setUint32(40, dataLength, true);
 
   return buffer;
@@ -136,21 +128,17 @@ function parseMimeType(mimeType: string): WavConversionOptions {
   const options: Partial<WavConversionOptions> = {
     numChannels: 1,
     bitsPerSample: 16,
-    sampleRate: 24000, // A common default
+    sampleRate: 24000,
   };
 
   if (formatPart && formatPart.startsWith('L')) {
     const bits = parseInt(formatPart.slice(1), 10);
-    if (!isNaN(bits)) {
-      options.bitsPerSample = bits;
-    }
+    if (!isNaN(bits)) options.bitsPerSample = bits;
   }
 
   for (const param of params) {
     const [key, value] = param.split('=').map(s => s.trim());
-    if (key === 'rate' && value) {
-      options.sampleRate = parseInt(value, 10);
-    }
+    if (key === 'rate' && value) options.sampleRate = parseInt(value, 10);
   }
 
   return options as WavConversionOptions;
@@ -161,23 +149,25 @@ function convertToWav(rawData: string[], mimeType: string): Uint8Array {
   const dataChunks = rawData.map(data => base64ToUint8Array(data));
   const data = concatUint8Arrays(dataChunks);
   const wavHeader = new Uint8Array(createWavHeader(data.length, options));
-  
   return concatUint8Arrays([wavHeader, data]);
 }
 
 // --- Main App Logic ---
 
-function setUiState(isLoading: boolean) {
-    chatInput.disabled = isLoading;
-    sendButton.disabled = isLoading;
-    if (isLoading) {
-        statusDiv.textContent = 'Assistant is responding...';
+function setUiState(isBusy: boolean, isRecordingActive: boolean = false) {
+    micButton.disabled = isBusy && !isRecordingActive;
+    if (isRecordingActive) {
+        micButton.classList.add('recording');
+        statusDiv.textContent = 'Listening... Tap to stop.';
+        addMessage('user', '...listening...');
     } else {
-        statusDiv.textContent = 'Ready. Type your message.';
+        micButton.classList.remove('recording');
+        statusDiv.textContent = isBusy ? 'Assistant is responding...' : 'Ready. Tap mic to talk.';
     }
 }
 
 async function handleTurn() {
+    isProcessingTurn = true;
     setUiState(true);
     let turnComplete = false;
     let turnText = '';
@@ -201,7 +191,7 @@ async function handleTurn() {
           }
       }
       
-      if (message.serverContent && message.serverContent.turnComplete) {
+      if (message.serverContent?.turnComplete) {
         turnComplete = true;
       }
     }
@@ -215,7 +205,10 @@ async function handleTurn() {
         audioParts = []; // Reset for next turn
     }
   
+    isProcessingTurn = false;
     setUiState(false);
+    // Process any queued messages that arrived during this turn
+    if (responseQueue.length > 0) processQueueContinuously();
 }
 
 function waitMessage(): Promise<LiveServerMessage> {
@@ -230,42 +223,86 @@ function waitMessage(): Promise<LiveServerMessage> {
   });
 }
 
-chatForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const userInput = chatInput.value.trim();
-    if (!userInput || !session) return;
+function processQueueContinuously() {
+    if (isProcessingTurn || responseQueue.length === 0) {
+        return;
+    }
+    handleTurn();
+}
 
-    addMessage('user', userInput);
-    chatInput.value = '';
+// --- Recording Logic ---
 
-    session.sendClientContent({
-        turns: [{ text: userInput }]
-    });
+async function startRecording() {
+    if (!session) return;
+    try {
+        audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(audioStream);
 
-    await handleTurn();
-});
+        mediaRecorder.ondataavailable = async (event) => {
+            if (event.data.size > 0 && session) {
+                const audioData = await event.data.arrayBuffer();
+                const base64Audio = arrayBufferToBase64(audioData);
+                session.sendClientContent({
+                    audioPart: {
+                        data: base64Audio,
+                        mimeType: mediaRecorder.mimeType,
+                    },
+                });
+            }
+        };
+
+        mediaRecorder.onstart = () => {
+            isRecording = true;
+            setUiState(false, true);
+        };
+        
+        mediaRecorder.onstop = () => {
+            isRecording = false;
+            setUiState(true, false); // Set to busy while waiting for final response
+        };
+
+        mediaRecorder.start(200); // Send audio chunks every 200ms
+    } catch (error) {
+        console.error('Microphone access denied:', error);
+        statusDiv.textContent = 'Microphone access is required.';
+        isRecording = false;
+        setUiState(false);
+    }
+}
+
+function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+    }
+    if (audioStream) {
+        audioStream.getTracks().forEach(track => track.stop());
+    }
+    audioStream = null;
+    mediaRecorder = null;
+}
+
+function toggleRecording() {
+    if (isRecording) {
+        stopRecording();
+    } else {
+        startRecording();
+    }
+}
+
+micButton.addEventListener('click', toggleRecording);
 
 async function main() {
   try {
-    const ai = new GoogleGenAI({
-      apiKey: process.env.API_KEY,
-    });
-
-    const model = 'models/gemini-2.5-flash-preview-native-audio-dialog';
-
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const model = 'gemini-2.5-flash';
     const config = {
-      responseModalities: [Modality.AUDIO],
+      requestModalities: [Modality.AUDIO],
+      responseModalities: [Modality.AUDIO, Modality.TEXT],
       mediaResolution: MediaResolution.MEDIA_RESOLUTION_MEDIUM,
       speechConfig: {
         voiceConfig: {
-          prebuiltVoiceConfig: {
-            voiceName: 'Zephyr',
-          },
+          prebuiltVoiceConfig: { voiceName: 'Zephyr' },
         },
-      },
-      contextWindowCompression: {
-        triggerTokens: '25600',
-        slidingWindow: { targetTokens: '12800' },
       },
       systemInstruction: {
         parts: [{
@@ -372,16 +409,17 @@ MENU DATA:
         },
         onmessage: function (message: LiveServerMessage) {
           responseQueue.push(message);
+          processQueueContinuously();
         },
         onerror: function (e: ErrorEvent) {
           console.error('Session error:', e.message);
           statusDiv.textContent = `Error: ${e.message}`;
-          setUiState(true); // Disable UI on error
+          setUiState(true);
         },
         onclose: function (e: CloseEvent) {
           console.log('Session closed:', e.reason);
           statusDiv.textContent = 'Connection closed. Please refresh.';
-          setUiState(true); // Disable UI on close
+          setUiState(true);
         },
       },
       config,

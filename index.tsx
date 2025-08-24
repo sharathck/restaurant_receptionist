@@ -4,8 +4,6 @@
 import {
   GoogleGenAI,
   LiveServerMessage,
-  MediaResolution,
-  Modality,
   Session,
 } from '@google/genai';
 
@@ -14,11 +12,13 @@ const chatContainer = document.getElementById('chat-container') as HTMLDivElemen
 const micButton = document.getElementById('mic-button') as HTMLButtonElement;
 const statusDiv = document.getElementById('status') as HTMLDivElement;
 const audioPlayer = document.getElementById('audio-player') as HTMLAudioElement;
+const chatForm = document.getElementById('chat-form') as HTMLFormElement;
+const chatInput = document.getElementById('chat-input') as HTMLInputElement;
+
 
 // State
 let session: Session | undefined = undefined;
 const responseQueue: LiveServerMessage[] = [];
-let audioParts: string[] = [];
 let currentModelTurn: HTMLDivElement | null = null;
 let isRecording = false;
 let mediaRecorder: MediaRecorder | null = null;
@@ -155,23 +155,34 @@ function convertToWav(rawData: string[], mimeType: string): Uint8Array {
 // --- Main App Logic ---
 
 function setUiState(isBusy: boolean, isRecordingActive: boolean = false) {
-    micButton.disabled = isBusy && !isRecordingActive;
-    if (isRecordingActive) {
+    if (isBusy) {
+        // Assistant is thinking/responding
+        micButton.disabled = true;
+        chatInput.disabled = true;
+        micButton.classList.remove('recording');
+        statusDiv.textContent = 'Assistant is responding...';
+    } else if (isRecordingActive) {
+        // User is recording
+        micButton.disabled = false; // Can be clicked to stop
+        chatInput.disabled = true;
         micButton.classList.add('recording');
         statusDiv.textContent = 'Listening... Tap to stop.';
-        addMessage('user', '...listening...');
     } else {
+        // Idle
+        micButton.disabled = false;
+        chatInput.disabled = false;
         micButton.classList.remove('recording');
-        statusDiv.textContent = isBusy ? 'Assistant is responding...' : 'Ready. Tap mic to talk.';
+        statusDiv.textContent = 'Ready. Type or tap mic.';
     }
 }
 
 async function handleTurn() {
     isProcessingTurn = true;
-    setUiState(true);
+    setUiState(true, false);
     let turnComplete = false;
     let turnText = '';
     let audioMimeType = '';
+    const audioParts: string[] = []; // Use a local array for each turn
 
     currentModelTurn = showLoadingIndicator();
   
@@ -196,19 +207,22 @@ async function handleTurn() {
       }
     }
     
+    const finishTurn = () => {
+        isProcessingTurn = false;
+        setUiState(false, false);
+        if (responseQueue.length > 0) processQueueContinuously();
+    };
+
     if (audioParts.length > 0 && audioMimeType) {
         const wavData = convertToWav(audioParts, audioMimeType);
         const blob = new Blob([wavData], { type: 'audio/wav' });
         const url = URL.createObjectURL(blob);
         audioPlayer.src = url;
         audioPlayer.play();
-        audioParts = []; // Reset for next turn
+        audioPlayer.onended = finishTurn;
+    } else {
+        finishTurn();
     }
-  
-    isProcessingTurn = false;
-    setUiState(false);
-    // Process any queued messages that arrived during this turn
-    if (responseQueue.length > 0) processQueueContinuously();
 }
 
 function waitMessage(): Promise<LiveServerMessage> {
@@ -243,16 +257,19 @@ async function startRecording() {
                 const audioData = await event.data.arrayBuffer();
                 const base64Audio = arrayBufferToBase64(audioData);
                 session.sendClientContent({
-                    audioPart: {
-                        data: base64Audio,
-                        mimeType: mediaRecorder.mimeType,
-                    },
+                    parts: [{
+                        inlineData: {
+                            data: base64Audio,
+                            mimeType: event.data.type,
+                        }
+                    }],
                 });
             }
         };
 
         mediaRecorder.onstart = () => {
             isRecording = true;
+            addMessage('user', '...listening...');
             setUiState(false, true);
         };
         
@@ -266,7 +283,7 @@ async function startRecording() {
         console.error('Microphone access denied:', error);
         statusDiv.textContent = 'Microphone access is required.';
         isRecording = false;
-        setUiState(false);
+        setUiState(false, false);
     }
 }
 
@@ -289,21 +306,27 @@ function toggleRecording() {
     }
 }
 
+async function handleTextInputSubmit(event: SubmitEvent) {
+    event.preventDefault();
+    if (!session || isRecording || isProcessingTurn) return;
+
+    const text = chatInput.value.trim();
+    if (text) {
+        addMessage('user', text);
+        chatInput.value = '';
+        setUiState(true, false);
+        await session.sendClientContent({ parts: [{ text }] });
+    }
+}
+
+chatForm.addEventListener('submit', handleTextInputSubmit);
 micButton.addEventListener('click', toggleRecording);
 
 async function main() {
   try {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    const model = 'gemini-2.5-flash';
+    const model = 'gemini-2.5-flash-preview-native-audio-dialog';
     const config = {
-      requestModalities: [Modality.AUDIO],
-      responseModalities: [Modality.AUDIO, Modality.TEXT],
-      mediaResolution: MediaResolution.MEDIA_RESOLUTION_MEDIUM,
-      speechConfig: {
-        voiceConfig: {
-          prebuiltVoiceConfig: { voiceName: 'Zephyr' },
-        },
-      },
       systemInstruction: {
         parts: [{
           text: `You are a friendly and professional restaurant receptionist assistant for "Triveni Express". Your primary role is to help customers with inquiries about the menu, prices, reservations, and hours. Always greet the customer with, "Welcome to Triveni Express." Keep your responses concise but helpful, as this is a voice interface.
@@ -405,7 +428,7 @@ MENU DATA:
         onopen: function () {
           console.log('Session opened.');
           statusDiv.textContent = 'Connection established. Ready.';
-          setUiState(false);
+          setUiState(false, false);
         },
         onmessage: function (message: LiveServerMessage) {
           responseQueue.push(message);
@@ -414,12 +437,12 @@ MENU DATA:
         onerror: function (e: ErrorEvent) {
           console.error('Session error:', e.message);
           statusDiv.textContent = `Error: ${e.message}`;
-          setUiState(true);
+          setUiState(true, false);
         },
         onclose: function (e: CloseEvent) {
           console.log('Session closed:', e.reason);
           statusDiv.textContent = 'Connection closed. Please refresh.';
-          setUiState(true);
+          setUiState(true, false);
         },
       },
       config,
@@ -427,7 +450,7 @@ MENU DATA:
   } catch(error) {
       console.error('Failed to initialize session:', error);
       statusDiv.textContent = 'Initialization failed. Check API Key and console.';
-      setUiState(true);
+      setUiState(true, false);
   }
 }
 

@@ -17,16 +17,16 @@
         </header>
         <div id="chat-container" class="chat-container" aria-live="polite"></div>
         <div id="status" class="status-bar" role="status">Connecting...</div>
-        <div class="chat-form-container">
-            <input type="text" id="chat-input" placeholder="Voice input is active" autocomplete="off" required disabled>
-            <button type="button" id="mic-button" disabled aria-label="Start recording">
+        <form id="chat-form" class="chat-form-container">
+            <input type="text" id="chat-input" placeholder="Type or tap mic..." autocomplete="off" required>
+            <button type="button" id="mic-button" aria-label="Start recording">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="24" height="24">
                     <path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"></path>
                     <path d="M11.99 17c-2.76 0-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V22h2v-3.08c3.39-.49 6-3.39 6-6.92h-2c0 2.76-2.24 5-5 5z"></path>
                     <path fill="none" d="M0 0h24v24H0z"/>
                 </svg>
             </button>
-        </div>
+        </form>
         <audio id="audio-player" style="display: none;"></audio>
     </main>
     <script type="importmap">
